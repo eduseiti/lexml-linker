@@ -987,6 +987,8 @@ contextoResolucao = do
   case ctx of
     Just (URNLexML _ (Documento _ (TipoDocumento1 (STD1_Norma (TipoNorma (Nome ["resolucao"]))) _) _) _ _ _) ->
         return True
+    Just (URNLexML _ (Documento _ (TipoDocumento1 (STD1_Norma (TipoNorma (Nome ["projeto","resolucao"]))) _) _) _ _ _) ->
+        return True
     _ -> return False
   
 tipoNorma :: LinkerParserMonad (Pos,Pos,[String],[QualificadorNorma],Bool,Bool)
