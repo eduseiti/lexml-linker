@@ -16,7 +16,7 @@ module LexML.Linker (
 
 import Text.HTML.TagSoup 
 import Control.Monad.Identity
-import Control.Monad.Except
+import Control.Monad.Except -- (ExceptT, mapExceptT)
 import LexML.Linker.LexerPrim (Token, LexError)
 import LexML.Render (render)
 import LexML.URN.Show
@@ -28,7 +28,8 @@ import LexML.Linker.ParserBase (LinkerComponent (..))
 import LexML.Linker.HtmlCleaner (cleanEmptyAnchors)
 import System.IO
 import Control.Monad
-import Control.Monad.Except
+import Control.Monad.Trans (liftIO)
+-- import Control.Monad.Except
 import Data.Typeable
 import Data.Map ( (!) )
 import qualified Data.Map as M
@@ -46,8 +47,8 @@ data LinkerError = LE_Lexer LexError | LE_Parser LinkerParseError | LE_Other Str
 
 myParseOptions = parseOptions { optTagPosition = False }
 
-mapError :: Monad m => (e1 -> e2) -> ExceptT e1 m a -> ExceptT e2 m a
-mapError g = mapExceptT (\m -> do { res <- m ; return $ either (Left . g) Right res })
+mapError' :: Monad m => (e1 -> e2) -> ExceptT e1 m a -> ExceptT e2 m a
+mapError' g = mapExceptT (\m -> do { res <- m ; return $ either (Left . g) Right res })
 
 type NomeContexto = String
 type SourceName = String
@@ -120,7 +121,7 @@ linker lo source = do
   linkerNotice $ "starting: context = " ++ show context 
 --  linkerLog "tags: "
 --  linkerLog $ concat ["    [" ++ show n ++ "] " ++ show t ++ "\n" | (n,t) <- zip [0 ..] tags ]
-  tokens' <- mapError LE_Lexer $ tokenStream tags
+  tokens' <- mapError' LE_Lexer $ tokenStream tags
   let initialTokenLength = length tokens'
   let (tokens,partial) = 
         case loTokenLimit lo of 

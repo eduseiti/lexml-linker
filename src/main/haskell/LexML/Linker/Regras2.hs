@@ -785,6 +785,7 @@ normaExtenso = do
   log'' $ "normaExtenso: retornando " ++ show (1 + length rl)
   t' <- if not precisaAutoConv then return t else do
           mc <- getUrnContexto
+	  log'' $ "normaExtesno: mc = " ++ show mc
           case mc of 
             Just urn | ehAutoridadeConvencionada (t urn) -> return t
                      | otherwise -> case autoridadeConvencionada urn of
