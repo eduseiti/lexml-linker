@@ -21,7 +21,7 @@ FROM lexmlbr/alpine-glibc:$LEXML_ALPINE_GLIBC_VERSION
 WORKDIR /root
 RUN apk update && \
     apk add -v -v --no-cache gmp
-COPY --from=build-base /root/linkertool /root/simplelinker /root/LinkerServer /usr/bin/
+COPY --from=build-base /root/linkertool /root/simplelinker /usr/bin/
 COPY version /etc/lexml-linker-build-version
 ENV LC_ALL=en_US.UTF-8
 ENV LANG=en_US.UTF-8
