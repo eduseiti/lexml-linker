@@ -8,13 +8,17 @@ LexML Linker: a Haskell tool that finds references ("remissões") to Brazilian l
 
 ## Build and run
 
-The package is `lexml-parser.cabal` (two executables, no library, **no test suite**). Build needs `alex` 3.2.x on PATH, because `src/main/haskell/LexML/Linker/Lexer.x` is compiled to `Lexer.hs`. The generated file is gitignored, so edit the `.x` file, not the generated one.
+The package is `lexml-parser.cabal` (two executables, no library, **no test suite**). The local build has been verified with GHC 9.4.7 (the same version as the Docker build) and cabal 3.16, both installed through `ghcup`. `src/main/haskell/LexML/Linker/Lexer.x` is compiled to `Lexer.hs` by `alex`. Cabal downloads and builds alex 3.2.7.4 itself because of `build-tool-depends`, so you don't need to install it. The generated `Lexer.hs` is gitignored, so edit the `.x` file.
+
+Run cabal with a UTF-8 locale (`LANG=C.UTF-8 LC_ALL=C.UTF-8` if `en_US.UTF-8` isn't installed). The sources and the test phrases contain Portuguese accented text. A clean build should print only a `-Wtabs` warning for `Regras2.hs:788`.
 
 ```bash
-cabal v2-build all                      # or: make  (runs cabal new-build)
-stack build                             # alternative; stack.yaml pins lts-20.26
-cabal v2-run linkertool -- -f 'Os incisos I e III do art. 8o da Lei n.o 12.527, de 18 de novembro de 2011'
-echo '<p>... art. 5º da Lei 8.666/1993 ...</p>' | cabal v2-run linkertool -- --hxml --xml
+cabal update && cabal v2-build all      # or: make  (runs cabal new-build)
+stack build                             # alternative; stack.yaml pins lts-20.26 (GHC 9.2.8, untested)
+cabal v2-run linkertool -- -f 'Os incisos I e III do par. 3o do art. 8o da Lei n.o. 12.527, de 18 de novembro de 2011'
+#   -> urn:lex:br:federal:lei:2011-11-18;12527!art8_par3_inc1
+#      urn:lex:br:federal:lei:2011-11-18;12527!art8_par3_inc3
+echo '<p>... art. 5º da Lei 8.666/1993 ...</p>' | $(cabal list-bin linkertool) --hxml --xml
 ./build.sh                              # Docker image lexmlbr/lexml-linker:<cabal version>
 ```
 
