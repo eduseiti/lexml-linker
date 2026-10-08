@@ -45,6 +45,9 @@ data ComponenteParseInfo = CPI {
       artigosSingular :: [String],
       numerosComp :: [NumeroParser],
       numerosEspecificos :: [NumeroParser],
+      numerosSemNome :: [NumeroParser],
+      numerosComNome :: [NumeroParser],
+      continuaComE :: Bool,
       subComponente :: Maybe ComponenteParseInfo,
       preposicoes :: [String],
       selectComp :: [Integer] -> SelectF,
@@ -76,6 +79,9 @@ cpiFeminino = CPI {
     , artigosSingular = ["a"]
     , numerosComp = []
     , numerosEspecificos = []
+    , numerosSemNome = []
+    , numerosComNome = []
+    , continuaComE = False
     , subComponente = Nothing
     , preposicoes = ["da"]
     , selectComp = const id
@@ -93,6 +99,9 @@ cpiMasculino = CPI {
     , artigosSingular = ["o"]
     , numerosComp = []
     , numerosEspecificos = []
+    , numerosSemNome = []
+    , numerosComNome = []
+    , continuaComE = False
     , subComponente = Nothing
     , preposicoes = ["do"]
     , selectComp = const id
@@ -108,6 +117,7 @@ compItem = cpiMasculino {
     , nomesCompPlural = [NC_Simple "itens"]
     , nomesCompSingular = [NC_Simple "item"]
     , numerosComp = [numeros numeroArabico]
+    , numerosEspecificos = [numeros numeroArabico]
     , selectComp = U.selecionaItem . UI_Indices
   }
 
@@ -118,7 +128,11 @@ compAlinea = cpiFeminino {
     , nomesCompPlural = [NC_Simple "alíneas", NC_Simple "alineas", NC_Simple "letras"]
     , nomesCompSingular = [NC_Simple "alínea", NC_Simple "alinea", NC_Simple "letra"]
     , numerosComp = [numeros numeroAlfabeto, numeros numeroArabico, numeros numeroRomano]
-    , numerosEspecificos = [numeros numeroAlfabeto']
+    -- letra sem aspas no direto: qualquer uma logo após o nome ("art. 55, alínea e"),
+    -- exceto "e" na continuação de lista ("alíneas “a” a “c”, e § 1º"); sem o nome, só entre aspas
+    , numerosEspecificos = [numeros numeroAlfabeto', numeros numeroAlfabetoExcetoE]
+    , numerosComNome = [numeros numeroAlfabeto', numeros numeroAlfabeto]
+    , numerosSemNome = [numeros numeroAlfabeto']
     , subComponente = Just compItem
     , selectComp = U.selecionaAlinea . UI_Indices
   }
@@ -132,8 +146,10 @@ compInciso = cpiMasculino {
     , nomesCompSingular = [NC_Simple "inciso", NC_Abrev "inc"]
     , numerosComp = [numeros numeroArabico, numeros numeroRomano]
     , numerosEspecificos = [numeros numeroRomano]
+    , numerosSemNome = [numeros numeroRomanoMaiusculo]
     , subComponente = Just compAlinea
     , selectComp = U.selecionaInciso . UI_Indices
+    , selectDefault = Just id
     , selectUnico = Just (["único","unico"],U.selecionaIncisoUnico)
   }
 
@@ -146,6 +162,8 @@ compParagrafo = cpiMasculino {
     , nomesSemNumero = [NC_Outro caput]
     , numerosComp = [variosNumeros' numeroOrdinal, variosNumeros' numeroArabico]
     , numerosEspecificos = [variosNumeros' numeroOrdinal, variosNumeros' (numeroArabicoMaiorQue 10)]
+    -- "§ 1º e 8º" (sem vírgula) são parágrafos; "§ 1º, e 7º" continua sendo artigo
+    , continuaComE = True
     , subComponente = Just compInciso
     , selectComp = U.selecionaParagrafo . UI_Indices
     , selectDefault = Just $ U.selecionaCaput
@@ -159,6 +177,8 @@ compArtigo = cpiMasculino {
     , nomesCompSingular = [NC_Simple "artigo", NC_Abrev "art"]
     , numerosComp = [variosNumeros' numeroOrdinal, variosNumeros' numeroArabico]
     , numerosEspecificos = [numeros numeroOrdinal, numeros (numeroArabicoMaiorQue 10)]
+    -- continuação de lista com "art." no singular: "art. 1º, 2º e 3º"
+    , numerosSemNome = [numeros numeroArtigoIsolado]
     , subComponente = Just compParagrafo 
     , selectComp = U.selecionaArtigo . UI_Indices
     , selectUnico = Just (["único","unico"],U.selecionaArtigoUnico)
@@ -222,16 +242,20 @@ listaDe m = do
     log'' $ "               listaDe(resl): starting"
     sep <- parseSeparator
     log'' $ "               listaDe(resl): sep parsed"
-    resl <- sepBy1 (try m) sep
+    -- separador sem elemento depois (", e art. 10") não descarta a lista lida
+    r1 <- try m
+    rs <- many (try (parseSeparator >> m)) -- "art. 3º, § 4º; art. 18-A, § 24, art. 18-B"
+    when (all null (r1 : rs)) $ fail "nenhum elemento após o separador"
     log'' $ "               listaDe(resl): resl parsed"
-    return (sep,concat resl)
+    return (sep,concat (r1 : rs))
   log'' $ "             listaDe: resl parsed"
   resl' <- option resl $ try $ do
               optional psep
               log'' $ "                 listaDe: checking for \"e\""
               constanteI "e"
               log'' $ "                 listaDe: \"e\" is present"
-              r <- m 
+              r <- m
+              when (null r) $ fail "elemento vazio após \"e\""
               log'' $ "                 listaDe: m parsed after \"e\""
               return (resl ++ r)
   return (res1 ++ resl')
@@ -268,7 +292,31 @@ parseComponenteDireto' reqNome cpi = do
     sc = selectComp cpi
     parseComponenteDiretoSingular = do
       log "parseComponenteDiretoSingular" "start"
-      optional $ try $ choice $ (map (\c -> constanteI c >> return ()) (artigosSingular cpi ++ ["no","na"]) ++
+      -- se o componente não vier depois do prefixo, tenta sem ele: em "alíneas a, b e c"
+      -- o "a" é a letra, não o artigo
+      let corpo = try compSingularComNumero <|> fmap (\c -> (False,[c])) compSingularSemNumero
+      (intervalo,comps) <- try (prefixoSingular >> corpo) <|> corpo
+      -- intervalo ("incisos I a III"): não há subcomponentes após o intervalo
+      if intervalo then return comps else do
+        -- os subcomponentes se aplicam ao último ("§ 5º e 6º, inciso II")
+        let (inicio,fim,selector) = last comps
+        (comE,subcomps) <- option (False,[]) $ try $ case subComponente cpi of
+            Nothing -> return (False,[])
+            Just subc -> do
+              log "parseComponenteDiretorSingular" $ "parsing for subcomponent (,)"
+              virgula <|> pontoevirgula
+              comE <- option False (constanteI "e" >> return True)
+              log "parseComponenteDiretorSingular" $ "parsing for subcomponent"
+              l <- parseComponenteDireto' True subc
+              return (comE,l)
+        let ultimo = case subcomps of
+              [] -> [(inicio,fim,selector)]
+              -- "art. 59, e § 1º": o próprio artigo e, em trecho separado, o parágrafo
+              _ | comE -> (inicio,fim,selector) : [(i,f,sf . selector) | (i,f,sf) <- subcomps]
+              (_,fim',sf):r -> (inicio,fim',sf . selector) : [(i,f,sf . selector) | (i,f,sf) <- r]
+        return (init comps ++ ultimo)
+
+    prefixoSingular = optional $ try $ choice $ (map (\c -> constanteI c >> return ()) (artigosSingular cpi ++ ["no","na"]) ++
         [ try $ do 
              log "parseComponenteDiretoSingular(nos termos)" "start"
              optional parseSeparator
@@ -282,26 +330,21 @@ parseComponenteDireto' reqNome cpi = do
           try $ do log "parseComponenteDiretoSingular(preposicao)" "start"
                    parsePreposicao cpi
                    log "parseComponenteDiretoSingular(preposicao)" "end"])
-      (inicio,fim,selector) <- try compSingularComNumero <|> compSingularSemNumero
-      subcomps <- option [] $ try $ case subComponente cpi of
-          Nothing -> return []
-          Just subc -> do
-            log "parseComponenteDiretorSingular" $ "parsing for subcomponent (,)"
-            virgula <|> pontoevirgula
-            log "parseComponenteDiretorSingular" $ "parsing for subcomponent"
-            parseComponenteDireto' True subc
-      case subcomps of
-        [] -> return [(inicio,fim,selector)]
-        (_,fim',sf):r -> return $ (inicio,fim',sf . selector) : [(i,f,sf . selector) | (i,f,sf) <- r]
-    
+
     compSingularSemNumero = do
       (s,msel) <- parseNomes $ nomesSemNumero cpi
       return (s,s,maybe id id msel)
 
     compSingularComNumero = 
-        do (minicio, mselect) <- (if reqNome then id else option (Nothing,Nothing)) (parseNomes (nomesCompSingular cpi) >>= \ (a,b) -> return (Just a,b))
+        do let numerosAposNome = if null (numerosComNome cpi) then numerosEspecificos cpi else numerosComNome cpi
+               comNome = parseNomes (nomesCompSingular cpi) >>= \ (a,_) -> return (Just a,numerosAposNome)
+           -- sem o nome, só os números de numerosSemNome ("art. 4º, IV", "art. 150, VI, "a"")
+               semNome = if null (numerosSemNome cpi) then fail "nome requerido"
+                                                       else return (Nothing,numerosSemNome cpi)
+           (minicio, numerosNome) <- if reqNome then comNome <|> semNome
+                                                else option (Nothing,numerosEspecificos cpi) comNome
            log "parseComponenteDiretoSingular" $ "minicio = " ++ show minicio
-           let mUnico = selectUnico cpi
+           let mUnico = if reqNome && isNothing minicio then Nothing else selectUnico cpi
            let unicoParser = \(labels,sel) -> do
                 log' cpi "parseComponenteSingular1"  $ "Unico: start labels = " ++ show labels
                 p1 <- choice (map (try . constanteI) labels)
@@ -309,10 +352,26 @@ parseComponenteDireto' reqNome cpi = do
                 return (p1,p1,(Nothing,sel)) 
            let mu = (maybeToList $ fmap unicoParser mUnico) :: [LinkerParserMonad (Pos,Pos,(Maybe [Integer],SelectF))]
            let np = (\p -> try p >>= \(p1,p2,num) -> return (p1,p2,(Just num,sc num))) :: NumeroParser -> LinkerParserMonad (Pos,Pos,(Maybe [Integer],SelectF))
-           (inicio2,fim,(num,sc')) <- choice (mu ++ (map np $ numerosEspecificos cpi))
+           (inicio2,fim,(num,sc')) <- choice (mu ++ map np numerosNome)
            log "parseComponenteDiretoSingular" $ "(inicio2,fim,num) = " ++ show (inicio2,fim,num)
            let inicio = maybe inicio2 id minicio
-           return (inicio,fim,sc')
+           -- fim de intervalo ("art. 4º, incisos IV a VI"), maior que o início
+           fimIntervalo <- case num of
+              Nothing -> return []
+              Just n1 -> option [] $ try $ do
+                constanteI "a"
+                (inicio3,fim3,(mn2,sc'')) <- choice (map np numerosNome)
+                case mn2 of
+                  Just n2 | n2 > n1 -> return [(inicio3,fim3,sc'')]
+                  _ -> fail "fim de intervalo não é maior que o início"
+           log "parseComponenteDiretoSingular" $ "fimIntervalo = " ++ show [(i,f) | (i,f,_) <- fimIntervalo]
+           maisUm <- if null fimIntervalo && isJust minicio && continuaComE cpi
+                       then option [] $ try $ do
+                              constanteI "e"
+                              (inicio4,fim4,(_,sc4)) <- choice (map np numerosNome)
+                              return [(inicio4,fim4,sc4)]
+                       else return []
+           return (not (null fimIntervalo), (inicio,fim,sc') : fimIntervalo ++ maisUm)
 
     parseComponenteDiretoPlural = do
       log "parseComponenteDiretoPlural" "starting"
@@ -365,14 +424,21 @@ parseComponentePlural2 cpi = do
           log' cpi "parseComponentePlural2(cl)" "sep parsed"
           cl <- sepBy (try (parseComponentePlural1 cpi) <|> parseComponenteSingular cpi) sep
           log' cpi "parseComponentePlural2(cl)" $ "cl parsed. "
-          optional sep
-          log' cpi "parseComponentePlural2(cl)" "optional sep parsed"
+          -- separador seguido só de componentes vazios não faz parte da lista ("alínea “i”; Lei ...")
+          when (all null cl) $ fail "nenhum componente após o separador"
           return cl
+  -- separador final só antes de "e" ("incisos I, II, e III") ou "ambos"/"todos"
+  -- ("do § 19, ambos do art. 3º"); não atravessa "; Lei ..."
+  optional (try (parseSeparator >> lookAhead (choice $ map constanteI ["e","ambos","ambas","todos","todas"])))
+  log' cpi "parseComponentePlural2(cl)" "optional sep parsed"
   cl' <- option cl $ try $ do
             log' cpi "parseComponentePlural2(cl,e)" "starting"
             constanteI "e" 
             log' cpi "parseComponentePlural2(cl,e)" "e parsed"
             r <- try (parseComponentePlural1 cpi) <|> parseComponenteSingular cpi
+            -- parseComponenteSingular pode retornar [] sem consumir nada; o "e"
+            -- não deve ser consumido nesse caso ("do art. 2º, e os arts. 51")
+            when (null r) $ fail "componente vazio após \"e\""
             log' cpi "parseComponentePlural2(cl,e)" $ "componente singular parsed"
             return (cl ++ [r])
   log' cpi "parseComponentePlural2" "returning"
@@ -381,8 +447,9 @@ parseComponentePlural2 cpi = do
 parseComponenteSingular ::  ComponenteParseInfo -> ParseCase2
 parseComponenteSingular cpi = combineM' subComponente' (
         do log' cpi "parseComponenteSingular"  "starting"
-           optional . choice $ map constanteI ["todos","todas","ambos","ambas"] ++
-                               [constanteI "nos" >> constanteI "termos"]
+           -- ", todos do art. 39", ", ambos do art. 3º"
+           optional . try $ optional parseSeparator >> (choice $ map constanteI ["todos","todas","ambos","ambas"] ++
+                               [constanteI "nos" >> constanteI "termos"])
            log' cpi "parseComponenteSingular"  "parsing preposicao"
            optional (parsePreposicao cpi) 
            log' cpi "parseComponenteSingular" "preposicao parsed"
@@ -455,12 +522,14 @@ parseListaNumeros numeros = do
     log'' $ "               parseListaNumeros(numl): starting"
     sep <- parseSeparator
     log'' $ "               parseListaNumeros(numl): sep parsed"
-    numl <- sepBy (intervalo' numero) sep
+    n1 <- intervalo' numero
+    ns <- many (try (sep >> intervalo' numero))
+    let numl = n1 : ns
     log'' $ "               parseListaNumeros(numl): numl parsed: " ++ show numl
-    optional sep
     return $ concat numl)
   log'' $ "             parseListaNumeros: numl parsed"
-  numl' <- option numl (try (constanteI "e" >> (try (intervalo' numero >>= \r -> return $ (numl ++ r)) <|>
+  -- "incisos I, II, e III": separador opcional antes do "e"
+  numl' <- option numl (try (optional parseSeparator >> constanteI "e" >> (try (intervalo' numero >>= \r -> return $ (numl ++ r)) <|>
                                                 (constanteI "seguintes" >> return numl) )))
   return (nums1 ++ numl')
 
@@ -536,6 +605,13 @@ numeroArabicoMaiorQue lb = try $
   do res@(i,f,n) <- numeroArabico
      if n > lb then return res else fail $ "num " ++ show n ++ ", less than " ++ show lb
        
+-- Número de artigo sem o nome: não pode ser o início de um número de norma ("e 8.036, de 1990")
+numeroArtigoIsolado :: LinkerParserMonad (Pos,Pos,Integer)
+numeroArtigoIsolado = do
+  r <- numeroOrdinal
+  notFollowedBy (try (ponto >> digitos 3))
+  return r
+
 numeroOrdinal :: LinkerParserMonad (Pos,Pos,Integer)
 numeroOrdinal = ordinal <|> ordinal' <|> extenso
   where
@@ -562,7 +638,16 @@ abrevNumero = try (choice $ map constanteI $ [ "n.", "n.o.", "no", "número", "n
                     return p)
 
 numeroRomano :: LinkerParserMonad (Pos,Pos,Integer)
-numeroRomano = palavraI parseStringNumeroRomano >>= \ (p,n) -> return (p,p,n)
+-- a palavra inteira: sem o eof, "incluídos" era lido como I
+numeroRomano = palavraI (parseStringNumeroRomano <* eof) >>= \ (p,n) -> return (p,p,n)
+
+-- Romano em maiúsculas ocupando a palavra inteira, para incisos sem o nome ("art. 4º, IV")
+numeroRomanoMaiusculo :: LinkerParserMonad (Pos,Pos,Integer)
+numeroRomanoMaiusculo = palavra romano >>= \ (p,n) -> return (p,p,n)
+  where
+    romano = do
+      s <- many1 (oneOf "IVXL") <* eof
+      either (fail . show) return $ parse (parseStringNumeroRomano <* eof) "" (map toLower s)
 
 parseStringNumeroRomano :: Text.Parsec.Prim.Stream s m Char => Text.Parsec.Prim.ParsecT s u m Integer
 parseStringNumeroRomano = do
@@ -619,11 +704,16 @@ numeroAlfabeto = do
         fim <- aspasDuplas
         return (inicio,fim,n)
   where
-    aspasDuplas = simbolo (Simbolo '"')
+    aspasDuplas = choice [simbolo (Simbolo c) | c <- "\"\8220\8221"]
     letra = lToken f >>= \(p,n) -> return (p,n)
       where
         f (Palavra [c]) | isAlpha c = return $ toInteger $ ord (toLower c) - (ord 'a') + 1
         f _ = fail "expected letter"
+
+numeroAlfabetoExcetoE :: LinkerParserMonad (Pos,Pos,Integer)
+numeroAlfabetoExcetoE = do
+  r@(_,_,n) <- numeroAlfabeto
+  if n == 5 then fail "\"e\" é conjunção" else return r
 
 numeroAlfabeto' :: LinkerParserMonad (Pos,Pos,Integer)
 numeroAlfabeto' = do
@@ -632,23 +722,93 @@ numeroAlfabeto' = do
     fim <- aspasDuplas
     return (inicio,fim,n)
   where
-    aspasDuplas = simbolo (Simbolo '"')
+    aspasDuplas = choice [simbolo (Simbolo c) | c <- "\"\8220\8221"]
     letra = lToken f >>= \(p,n) -> return (p,n)
       where
         f (Palavra [c]) | isAlpha c = return $ toInteger $ ord (toLower c) - (ord 'a') + 1
         f _ = fail "expected letter"
 
 norma ::  ParseCase2
-norma = (try (parseComponenteDireto compArtigo) <|> parseComponente compArtigo) `combineM` norma'
+norma = try normaPosposta <|>
+        ((try (parseComponenteDireto compArtigo) <|> parseComponente compArtigo) `combineM` norma')
 
-  
-norma' ::  ParseCase2
-norma' = do
-  log'' $ "norma': starting"
-  optional $ do
+-- Norma seguida dos dispositivos, comum em citações entre parênteses:
+-- "(Lei nº 9.250, de 1995, art. 4º, § 1º, e Lei nº 8.981, de 1995, art. 34)".
+-- O primeiro dispositivo começa no início da norma, como em combine.
+normaPosposta :: ParseCase2
+normaPosposta = do
+  log'' $ "normaPosposta: starting"
+  -- "com redação dada pela Lei nº 12.715, de 2012, art. 61; e § 3º": o que vem depois do
+  -- artigo da norma alteradora é da norma alterada
+  alteradora <- option False $ try $ do
+    constantesI palavrasAlteracao
+    choice (map constanteI ["pela","pelo"])
+    return True
+  [(inicio,_,urnNorma)] <- normaCorpo
+  -- "Decreto nº 3.000, de 1999 – Regulamento do Imposto sobre a Renda (RIR/1999), art. 75"
+  optional descricaoNorma
+  optional parentetico -- "Lei nº 5.172, de 1966 (Código Tributário Nacional), art. 104"
+  virgula
+  -- só "Lei ..., art. N": em "Lei ..., e art. N" ou "Lei ..., § 2º" a ligação é incerta
+  lookAhead $ choice $ map constanteI ["art","arts","artigo","artigos"]
+  comps <- if alteradora then artigoUnico
+                        else try (parseComponenteDireto compArtigo) <|> parseComponente compArtigo
+  when (null comps) $ fail "normaPosposta: sem dispositivos"
+  -- "Lei nº 1, art. 5º da Lei nº 2": os dispositivos são da norma seguinte
+  notFollowedBy (try $ normaPreposicao >> normaCorpo >> return ())
+  log'' $ "normaPosposta: returning " ++ show (length comps)
+  let ((_,fim1,sel1):rl) = comps
+  return $ (inicio,fim1,sel1 . urnNorma) : [(i,f,sel . urnNorma) | (i,f,sel) <- rl]
+
+-- "redação dada pela", "incluído pela", ...; "aprovado pelo Decreto" não é alteração
+palavrasAlteracao :: [String]
+palavrasAlteracao = [ p ++ g | p <- ["dad","incluíd","incluid","acrescentad","acrescid","introduzid","alterad","renumerad"],
+                               g <- ["o","a","os","as"] ]
+
+artigoUnico :: ParseCase2
+artigoUnico = do
+  (inicio,_) <- parseNomes (nomesCompSingular compArtigo)
+  (_,fim,n) <- choice (map try (numerosEspecificos compArtigo))
+  return [(inicio,fim,selectComp compArtigo n)]
+
+descricaoNorma :: LinkerParserMonad ()
+descricaoNorma = try $ do
+  (hifen >> return ()) <|> (choice [simbolo (Simbolo c) | c <- "\8211\8212"] >> return ())
+  manyMN 1 12 $ palavraFilter $ \p -> map toLower p `notElem` ["art","arts","artigo","artigos","e"]
+  return ()
+
+parentetico :: LinkerParserMonad ()
+parentetico = try $ do
+  simbolo (Simbolo '(')
+  manyMN 0 12 $ lToken $ \t -> case t of
+                                  Simbolo c | c `elem` "()" -> Nothing
+                                  _ -> Just ()
+  simbolo (Simbolo ')')
+  return ()
+
+normaPreposicao :: LinkerParserMonad ()
+normaPreposicao = do
     optional virgula
     optional $ choice $ map constanteI ["todos","todas","ambas","ambos"]
     choice $ map constanteI ["de","do","da"]
+    return ()
+
+norma' ::  ParseCase2
+norma' = do
+  log'' $ "norma': starting"
+  soVirgula <- (try (normaPreposicao) >> return False) <|> (virgula >> return True) <|> return False
+  r <- normaCorpo
+  -- só com a vírgula ("art. 78, § 1, Lei n. 8.112/1990"), a norma não pode ter os próprios
+  -- dispositivos em seguida ("…, art. 59, e § 1º, Decreto-Lei nº 2.454, de 1988, art. 1º")
+  when soVirgula $ notFollowedBy $ try $ do
+    optional descricaoNorma
+    optional parentetico
+    virgula
+    choice $ map constanteI ["art","arts","artigo","artigos"]
+  return r
+
+normaCorpo ::  ParseCase2
+normaCorpo = do
   log'' $ "norma': parsing norma"
   cs <- shouldParseConstituicaoSimples
   if cs then try constituicao1988 <|> try apelidos <|> normaExtenso
@@ -661,8 +821,13 @@ constituicao1988 = do
   previous_tokens <- prev_tokens
   if take 1 previous_tokens == [Palavra "de"] then  fail "preposição de" else return ()
   log'' $ "constituicao1988: previous_tokens = " ++ show previous_tokens
-  (inicio,fim) <- try (do i <- nomeProprio "Constituição" ; f <- option i (constanteI "federal") ; return (i,f)) <|>
+  (inicio,fim1) <- try (do i <- nomeProprio "Constituição" ; f <- option i (constanteI "federal") ; return (i,f)) <|>
                   (do i <- constanteI "constituicao" ; f <- constanteI "federal" ; return (i,f))
+  -- "Constituição Federal de 1988"
+  fim <- option fim1 $ try $ do
+    constanteI "de"
+    (p,(n,_)) <- numero
+    if n == 1988 then return p else fail "não é 1988"
   return [(inicio,fim,U.selecionaConstituicao' (Just 1988) (Just (10,5)) Nothing Nothing)]
 
 constituicao ::  ParseCase2
@@ -874,9 +1039,14 @@ parseQualData2 = try $ do
   barra
   (p,(n,_)) <- numero
   n' <- if n < 0 || (n > 99 && n < 1800) || n > 2100 then fail ("expecting ano: " ++ show n) 
-        else if n < 100 then return (1900 + n)
-        else return n
+        else return (anoQuatroDigitos n)
   return (p,p,NLD_Data (fromIntegral n') Nothing)
+
+-- Ano com dois dígitos ("Lei nº 7.713/88", "de 29/12/03"): 00-30 -> 20xx, demais -> 19xx
+anoQuatroDigitos :: Integer -> Integer
+anoQuatroDigitos n | n < 0 || n >= 100 = n
+                   | n <= 30 = 2000 + n
+                   | otherwise = 1900 + n
 
 
   
@@ -1072,7 +1242,7 @@ parseDataAbrev = do
   (_,(mes,_)) <- numero
   barra
   (fim,(ano,_)) <- numero
-  return (inicio,fim,(fromIntegral (ano :: Integer),fromIntegral mes,fromIntegral (dia :: Integer)))
+  return (inicio,fim,(fromIntegral (anoQuatroDigitos ano),fromIntegral mes,fromIntegral (dia :: Integer)))
   
 
 parseMes :: LinkerParserMonad (Pos,Int)
@@ -1115,7 +1285,7 @@ checkInitialToken = do
     f Paragrafo = True
     f _ = False
 
-initialWords = S.fromList [
+initialWords = S.fromList $ palavrasAlteracao ++ [ -- "redação dada pela Lei ..., art. N" (normaPosposta)
     "lei",
     "leis",
     "decreto",

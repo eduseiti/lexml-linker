@@ -60,3 +60,10 @@ The context URN (`lpsContexto`, available through `getUrnContexto`) changes what
 - `normaExtenso`: types flagged `precisaAutoConv` take the esfera (federal/estadual/…) from the context authority via `URN/Utils.autoridadeConvencionada`. To make a new institution count as federal, add it there.
 - `loConstituicaoSimples` is set from `refContextoFederal`: a bare "Constituição" means CF/1988 only in a federal context.
 - `prev_tokens` (`lpsPrevTokens`) lets a rule inspect already-consumed tokens. For example, `constituicao1988` refuses a match right after "de".
+
+## Conventions
+
+**IMPORTANT:** every `.md` file created in `work_history/` must be prefixed with a `YYYYMMDD_HHMMSS_`
+timestamp taken from the output of `date +%Y%m%d_%H%M%S` at creation time (e.g.
+`20260923_193852_segmentation_strategies_for_rag_experiments.md`). `CLAUDE.md` and any `README.md`
+are the exceptions.
